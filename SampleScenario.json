@@ -1,0 +1,42 @@
+{
+  "Requests": [
+    {
+      "Name": "Get User Profile",
+      "Endpoint": "api/users/profile",
+      "Method": "GET",
+      "Headers": {
+        "Accept-Language": "en-US"
+      },
+      "Body": "",
+      "ThinkTimeMs": 1000
+    },
+    {
+      "Name": "Get Product List",
+      "Endpoint": "api/products",
+      "Method": "GET",
+      "Headers": {},
+      "Body": "",
+      "ThinkTimeMs": 2000
+    },
+    {
+      "Name": "Add Item to Cart",
+      "Endpoint": "api/cart/items",
+      "Method": "POST",
+      "Headers": {
+        "Content-Type": "application/json"
+      },
+      "Body": "{ \"productId\": 12345, \"quantity\": 1 }",
+      "ThinkTimeMs": 1500
+    },
+    {
+      "Name": "Submit Order",
+      "Endpoint": "api/orders",
+      "Method": "POST",
+      "Headers": {
+        "Content-Type": "application/json"
+      },
+      "Body": "{ \"cartId\": \"cart-uuid\", \"paymentMethod\": \"credit-card\", \"shippingAddressId\": 123 }",
+      "ThinkTimeMs": 0
+    }
+  ]
+}
