@@ -84,10 +84,11 @@ namespace LoadTester
             _apiKey = apiKey;
             _scenario = scenario;
             _resultCollector = resultCollector;
-            _httpClient = new HttpClient();
-            _httpClient.DefaultRequestHeaders.Add("Authorization", $"Bearer {_apiKey}");
-            _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            _httpClient = new HttpClient(/*new LoggingHandler(new HttpClientHandler())*/);
 
+
+            _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            _httpClient.DefaultRequestHeaders.Add("Authorization","APIKEY " + _apiKey);
             ReceiveAsync<StartTest>(async _ => await ExecuteScenario());
         }
 
@@ -116,43 +117,123 @@ namespace LoadTester
         {
             var stopwatch = Stopwatch.StartNew();
             var result = new RequestResult { RequestName = request.Name };
-
             try
             {
                 var url = $"{_baseUrl}/{request.Endpoint.TrimStart('/')}";
                 var httpRequest = new HttpRequestMessage(new HttpMethod(request.Method), url);
 
                 // Add custom headers
+                var contentType = "application/json";
                 if (request.Headers != null)
                 {
+                    
                     foreach (var header in request.Headers)
                     {
+                        if (header.Key.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
+                        {
+                            contentType = header.Value;
+                        }
+                        else
                         httpRequest.Headers.Add(header.Key, header.Value);
                     }
                 }
+              
 
                 // Add body for POST, PUT, PATCH
-                if (!string.IsNullOrEmpty(request.Body) && 
+                if (request.HasBody && 
                     (request.Method.Equals("POST", StringComparison.OrdinalIgnoreCase) || 
                      request.Method.Equals("PUT", StringComparison.OrdinalIgnoreCase) || 
                      request.Method.Equals("PATCH", StringComparison.OrdinalIgnoreCase)))
                 {
-                    httpRequest.Content = new StringContent(request.Body, Encoding.UTF8, "application/json");
+                    if (contentType.StartsWith("multipart/form-data"))
+                    {
+                        var mpContent = new MultipartFormDataContent();
+                        foreach(var part in request.MultiPartContents)
+                        {
+                            if (!string.IsNullOrEmpty(part.FileName))
+                            {
+                                // For simplicity, this example assumes file path is in Value
+                                // In real implementation, you might need to adapt this based on how you're storing file data
+                                try
+                                {
+                                    byte[] fileBytes;
+
+                                    // Check if the Value contains actual file content (base64 encoded)
+                                    if (Common.IsBase64String(part.Value))
+                                    {
+                                        fileBytes = Convert.FromBase64String(part.Value);
+                                    }
+                                    // Otherwise, treat Value as a file path
+                                    else if (File.Exists(part.Value))
+                                    {
+                                        fileBytes = File.ReadAllBytes(part.Value);
+                                    }
+                                    else
+                                    {
+                                        // If it's not a file path or base64, just use the string content
+                                        fileBytes = System.Text.Encoding.UTF8.GetBytes(part.Value);
+                                    }
+
+                                    var fileContent = new ByteArrayContent(fileBytes);
+
+                                    // Set content type if available
+                                    if (!string.IsNullOrEmpty(part.ContentType))
+                                    {
+                                        fileContent.Headers.ContentType = MediaTypeHeaderValue.Parse(part.ContentType);
+                                    }
+
+                                    mpContent.Add(fileContent, part.Name, part.FileName);
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"Error processing file content for {part.Name}: {ex.Message}");
+                                    // Fallback to string content if file processing fails
+                                    mpContent.Add(new StringContent(part.Value ?? string.Empty), part.Name);
+                                }
+                            }
+                            // Handle string content
+                            else
+                            {
+                                var stringContent = new StringContent(part.Value ?? string.Empty);
+
+                                // Set content type if available
+                                if (!string.IsNullOrEmpty(part.ContentType))
+                                {
+                                    stringContent.Headers.ContentType = MediaTypeHeaderValue.Parse(part.ContentType);
+                                }
+
+                                mpContent.Add(stringContent, part.Name);
+                            }
+                        }
+                        httpRequest.Content = mpContent;
+                        // byte[] bodyBytes = Encoding.UTF8.GetBytes(request.Body);
+                        // httpRequest.Content = new ByteArrayContent(bodyBytes);
+                        // httpRequest.Headers.TryAddWithoutValidation("Content-Type", contentType);
+
+                    } 
+                    else 
+                    {
+                        httpRequest.Content = new StringContent(request.Body, Encoding.UTF8, contentType);
+                    }
                 }
 
                 var response = await _httpClient.SendAsync(httpRequest);
                 
                 result.StatusCode = (int)response.StatusCode;
                 result.Success = response.IsSuccessStatusCode;
-                
+                var content = await response.Content.ReadAsStringAsync();
                 // For debugging - can be removed for production
                 if (!response.IsSuccessStatusCode)
                 {
-                    result.Error = await response.Content.ReadAsStringAsync();
+                    result.Error = content;
+                    Console.Error.WriteLine("ERROR: " + content);
                 }
+
             }
             catch (Exception ex)
             {
+                Console.WriteLine("5. Making request to "+ex.Message);
+
                 result.Success = false;
                 result.Error = ex.Message;
             }
@@ -392,4 +473,59 @@ namespace LoadTester
             }
         }
     }
+    class LoggingHandler : DelegatingHandler
+{
+    public LoggingHandler(HttpMessageHandler innerHandler) : base(innerHandler) { }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Console.WriteLine("🚀 Final Request Headers Being Sent:");
+        
+        foreach (var header in request.Headers)
+        {
+            Console.WriteLine($"{header.Key}: {string.Join(", ", header.Value)}");
+        }
+
+        if (request.Content != null)
+        {
+            foreach (var header in request.Content.Headers)
+            {
+                Console.WriteLine($"{header.Key}: {string.Join(", ", header.Value)}");
+            }
+        }
+
+        Console.WriteLine("=====================================\n");
+        return await base.SendAsync(request, cancellationToken);
+    }
+}
+public static class Common
+{
+    public static bool IsBase64String(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return false;
+
+            // Remove any Base64 padding characters
+            value = value.Trim();
+            
+            // Base64 strings are always divisible by 4 after padding
+            if (value.Length % 4 != 0)
+            {
+                // Try to add padding
+                value = value.PadRight(value.Length + (4 - value.Length % 4), '=');
+            }
+
+            try
+            {
+                // Try to decode it
+                Convert.FromBase64String(value);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+}
+
 }

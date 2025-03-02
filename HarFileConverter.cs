@@ -78,6 +78,24 @@ namespace LoadTester
 
         [JsonPropertyName("mimeType")]
         public string MimeType { get; set; }
+
+        [JsonPropertyName("params")]
+        public List<HarPostParam> Params { get; set; }
+    }
+
+    public class HarPostParam
+    {
+        [JsonPropertyName("name")]
+        public string Name { get; set; }
+
+        [JsonPropertyName("value")]
+        public string Value { get; set; }
+
+        [JsonPropertyName("fileName")]
+        public string FileName { get; set; }
+
+        [JsonPropertyName("contentType")]
+        public string ContentType { get; set; }
     }
 
     // Scenario classes
@@ -93,7 +111,18 @@ namespace LoadTester
         public string Method { get; set; }
         public Dictionary<string, string> Headers { get; set; } = new Dictionary<string, string>();
         public string Body { get; set; }
+        public List<MultiPartContent> MultiPartContents { get; set; } = new List<MultiPartContent>();
+        public bool IsMultiPart { get; set; }
         public int ThinkTimeMs { get; set; }
+        public bool HasBody => !string.IsNullOrEmpty(Body) || MultiPartContents.Count > 0;
+    }
+
+    public class MultiPartContent
+    {
+        public string Name { get; set; }
+        public string Value { get; set; }
+        public string FileName { get; set; }
+        public string ContentType { get; set; }
     }
 
     public class HarFileConverter
@@ -115,7 +144,8 @@ namespace LoadTester
             "text/json",
             "application/xml",
             "text/xml",
-            "text/plain"
+            "text/plain",
+            "multipart/form-data"
         };
 
         public static void ConvertHarToScenario(string inputFile, string outputFile, int defaultThinkTimeMs)
@@ -164,6 +194,9 @@ namespace LoadTester
                         lastTimestamp = firstTimestamp;
                     }
                     
+                    // Check if request is multipart
+                    bool isMultiPart = IsMultiPartFormData(request);
+                    
                     // Create API request
                     var apiRequest = new ApiRequest
                     {
@@ -171,9 +204,19 @@ namespace LoadTester
                         Endpoint = endpoint,
                         Method = request.Method,
                         Headers = ExtractRelevantHeaders(request.Headers),
-                        Body = ExtractBody(request),
-                        ThinkTimeMs = thinkTime
+                        ThinkTimeMs = thinkTime,
+                        IsMultiPart = isMultiPart
                     };
+                    
+                    // Extract body content based on content type
+                    if (isMultiPart)
+                    {
+                        apiRequest.MultiPartContents = ExtractMultiPartContents(request);
+                    }
+                    else
+                    {
+                        apiRequest.Body = ExtractBody(request);
+                    }
                     
                     scenario.Requests.Add(apiRequest);
                 }
@@ -225,6 +268,18 @@ namespace LoadTester
             
             return AllowedContentTypes.Any(allowedType => 
                 contentTypeHeader.Value.Contains(allowedType, StringComparison.OrdinalIgnoreCase));
+        }
+        
+        private static bool IsMultiPartFormData(HarRequest request)
+        {
+            if (request.Headers == null) return false;
+            
+            var contentTypeHeader = request.Headers.FirstOrDefault(h => 
+                h.Name.Equals("Content-Type", StringComparison.OrdinalIgnoreCase));
+            
+            if (contentTypeHeader == null) return false;
+            
+            return contentTypeHeader.Value.Contains("multipart/form-data", StringComparison.OrdinalIgnoreCase);
         }
         
         private static string ExtractEndpoint(string url)
@@ -316,6 +371,95 @@ namespace LoadTester
             }
             
             return "";
+        }
+
+        private static List<MultiPartContent> ExtractMultiPartContents(HarRequest request)
+        {
+            var multiPartContents = new List<MultiPartContent>();
+            
+            if (request.PostData != null && request.PostData.Params != null)
+            {
+                foreach (var param in request.PostData.Params)
+                {
+                    multiPartContents.Add(new MultiPartContent
+                    {
+                        Name = param.Name,
+                        Value = param.Value,
+                        FileName = param.FileName,
+                        ContentType = param.ContentType
+                    });
+                }
+            }
+            else if (request.PostData != null && !string.IsNullOrEmpty(request.PostData.Text))
+            {
+                // Try to parse multipart form data from text
+                try
+                {
+                    // Look for boundary
+                    var contentTypeHeader = request.Headers?.FirstOrDefault(h => 
+                        h.Name.Equals("Content-Type", StringComparison.OrdinalIgnoreCase));
+                    
+                    if (contentTypeHeader != null)
+                    {
+                        var match = Regex.Match(contentTypeHeader.Value, @"boundary=(?:""([^""]+)""|([^\s;]+))");
+                        if (match.Success)
+                        {
+                            string boundary = match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
+                            
+                            // Split by boundary
+                            string[] parts = request.PostData.Text.Split(
+                                new[] { "--" + boundary }, 
+                                StringSplitOptions.RemoveEmptyEntries
+                            );
+                            
+                            foreach (var part in parts)
+                            {
+                                if (part.Trim().StartsWith("--")) continue; // End boundary
+                                
+                                // Extract content disposition
+                                var contentMatch = Regex.Match(part, 
+                                    @"Content-Disposition:\s*form-data;\s*name=""([^""]+)""(?:;\s*filename=""([^""]+)"")?", 
+                                    RegexOptions.IgnoreCase);
+                                
+                                if (contentMatch.Success)
+                                {
+                                    string name = contentMatch.Groups[1].Value;
+                                    string fileName = contentMatch.Groups[2].Success ? contentMatch.Groups[2].Value : null;
+                                    
+                                    // Extract content type
+                                    string contentType = null;
+                                    var contentTypeMatch = Regex.Match(part, 
+                                        @"Content-Type:\s*([^\r\n]+)", 
+                                        RegexOptions.IgnoreCase);
+                                    
+                                    if (contentTypeMatch.Success)
+                                    {
+                                        contentType = contentTypeMatch.Groups[1].Value.Trim();
+                                    }
+                                    
+                                    // Extract value (everything after the double line break)
+                                    var valueMatch = Regex.Match(part, @"\r\n\r\n([\s\S]+)$");
+                                    string value = valueMatch.Success ? valueMatch.Groups[1].Value.Trim() : "";
+                                    
+                                    multiPartContents.Add(new MultiPartContent
+                                    {
+                                        Name = name,
+                                        Value = value,
+                                        FileName = fileName,
+                                        ContentType = contentType
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error parsing multipart form data: {ex.Message}");
+                }
+            }
+            
+            return multiPartContents;
         }
     }
 }
